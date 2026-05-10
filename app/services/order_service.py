@@ -30,6 +30,7 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
         quantity=data.quantity,
         price=data.price,
         status=OrderStatus.PENDING,
+        wallet_reference_id=reference_id,
     )
     db.add(order)
     await db.flush()
@@ -41,8 +42,9 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
             order_type=data.order_type,
             quantity=data.quantity,
             price=data.price,
+            platform_user_id=user_id,
         )
-        order.exchange_order_id = exchange_resp.get("orderId") or exchange_resp.get("id")
+        order.exchange_order_id = exchange_resp.get("order_id")
         order.status = OrderStatus.ACCEPTED
         await db.commit()
         await db.refresh(order)

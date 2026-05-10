@@ -37,6 +37,7 @@ class Order(Base):
         Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING
     )
     exchange_order_id: Mapped[str] = mapped_column(String(100), nullable=True)
+    wallet_reference_id: Mapped[str] = mapped_column(String(200), nullable=True)
     filled_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     filled_price: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
     reject_reason: Mapped[str] = mapped_column(String(500), nullable=True)

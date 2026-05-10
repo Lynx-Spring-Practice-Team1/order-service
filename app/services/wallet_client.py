@@ -28,3 +28,14 @@ async def release_funds(user_id: int, reference_id: str) -> dict:
         if resp.status_code != 200:
             raise WalletError(resp.json().get("detail", "Release failed"), resp.status_code)
         return resp.json()
+
+
+async def settle_trade(user_id: int, reference_id: str, actual_amount: float) -> dict:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{settings.WALLET_SERVICE_URL}/wallet/settle",
+            json={"user_id": user_id, "reference_id": reference_id, "actual_amount": actual_amount},
+        )
+        if resp.status_code != 200:
+            raise WalletError(resp.json().get("detail", "Settle failed"), resp.status_code)
+        return resp.json()
