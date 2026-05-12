@@ -45,6 +45,7 @@ async def place_order(
             json=payload,
             headers=_auth_headers(),
         )
+        print(f"[exchange_client] place_order → {resp.status_code} | {resp.text}", flush=True)
         if resp.status_code not in (200, 201):
             raise ExchangeError(resp.text, resp.status_code)
         return resp.json()

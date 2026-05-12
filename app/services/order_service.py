@@ -1,11 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.models import Order, OrderStatus, OrderSide, OrderType
 from app.schemas import OrderCreate
-from app.services import kafka_producer, exchange_client, wallet_client
+from app.services import kafka_producer, wallet_client, exchange_client
+from app.services.exchange_ws_consumer import consumer as ws_consumer, ExchangeWsError
 
 
 async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Order:
@@ -13,8 +14,9 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
     reserved = False
     reference_id = None
 
-    if data.side == OrderSide.BUY and data.price is not None:
-        estimated_cost = float(data.price) * data.quantity
+    reserve_price = data.price if data.price is not None else data.market_price_estimate
+    if data.side == OrderSide.BUY and reserve_price is not None:
+        estimated_cost = float(reserve_price) * data.quantity
         reference_id = f"order-{user_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         try:
             await wallet_client.reserve_funds(user_id, estimated_cost, reference_id)
@@ -36,14 +38,21 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
     await db.flush()
 
     try:
-        exchange_resp = await exchange_client.place_order(
-            symbol=data.symbol,
-            side=data.side,
-            order_type=data.order_type,
-            quantity=data.quantity,
-            price=data.price,
-            platform_user_id=user_id,
-        )
+        ws_payload = {
+            "platform_user_id": str(user_id),
+            "instrument_type": "STOCK",
+            "instrument_id": data.symbol,
+            "order_type": data.order_type.value,
+            "side": data.side.value,
+            "quantity": data.quantity,
+        }
+        if data.order_type == OrderType.LIMIT:
+            ws_payload["limit_price"] = float(data.price)
+            ws_payload["expires_at"] = (
+                datetime.now(timezone.utc) + timedelta(hours=24)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        exchange_resp = await ws_consumer.place_order(ws_payload)
         order.exchange_order_id = exchange_resp.get("order_id")
         order.status = OrderStatus.ACCEPTED
         await db.commit()
@@ -68,7 +77,7 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
             {"order_id": order.id, "user_id": user_id, "exchange_order_id": order.exchange_order_id},
         )
 
-    except exchange_client.ExchangeError as e:
+    except ExchangeWsError as e:
         order.status = OrderStatus.REJECTED
         order.reject_reason = str(e)
         await db.commit()

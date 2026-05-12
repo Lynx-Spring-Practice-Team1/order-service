@@ -10,6 +10,7 @@ class OrderCreate(BaseModel):
     order_type: OrderType
     quantity: int = Field(..., gt=0)
     price: Optional[float] = Field(None, gt=0)
+    market_price_estimate: Optional[float] = Field(None, gt=0)
 
 
 class OrderResponse(BaseModel):

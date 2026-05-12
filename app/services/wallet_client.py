@@ -39,3 +39,14 @@ async def settle_trade(user_id: int, reference_id: str, actual_amount: float) ->
         if resp.status_code != 200:
             raise WalletError(resp.json().get("detail", "Settle failed"), resp.status_code)
         return resp.json()
+
+
+async def credit_funds(user_id: int, amount: float) -> dict:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{settings.WALLET_SERVICE_URL}/wallet/credit",
+            json={"user_id": user_id, "amount": amount},
+        )
+        if resp.status_code != 200:
+            raise WalletError(resp.json().get("detail", "Credit failed"), resp.status_code)
+        return resp.json()

@@ -11,19 +11,123 @@ from app.models import Order, OrderStatus
 from app.services import kafka_producer, wallet_client
 
 logger = logging.getLogger(__name__)
-
 RECONNECT_DELAY = 5
+
+_TERMINAL_STATUSES = {"FILLED", "PARTIALLY_FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+_STATUS_MAP = {
+    "FILLED": OrderStatus.FILLED,
+    "CANCELLED": OrderStatus.CANCELLED,
+    "EXPIRED": OrderStatus.CANCELLED,
+    "REJECTED": OrderStatus.REJECTED,
+}
+
+
+class ExchangeWsError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class ExchangeWsConsumer:
+    def __init__(self):
+        self._ws = None
+        self._pending_order: asyncio.Future | None = None
+        self._order_lock = asyncio.Lock()
+
+    async def place_order(self, payload: dict) -> dict:
+        if self._ws is None:
+            raise ExchangeWsError("WS_DISCONNECTED", "WebSocket not connected")
+
+        async with self._order_lock:
+            loop = asyncio.get_event_loop()
+            self._pending_order = loop.create_future()
+            try:
+                await self._ws.send(json.dumps({
+                    "type": "PLACE_ORDER",
+                    "payload": payload,
+                }))
+                return await asyncio.wait_for(
+                    asyncio.shield(self._pending_order), timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                raise ExchangeWsError("TIMEOUT", "No ACK from exchange within 10 s")
+            finally:
+                self._pending_order = None
+
+    async def run(self):
+        import websockets
+        url = (
+            f"{settings.EXCHANGE_WS_URL}"
+            f"?api_key={settings.EXCHANGE_API_KEY}"
+            f"&api_secret={settings.EXCHANGE_API_SECRET}"
+        )
+        while True:
+            try:
+                async with websockets.connect(url) as ws:
+                    self._ws = ws
+                    await ws.send(json.dumps({
+                        "type": "SUBSCRIBE",
+                        "payload": {"channel": "ORDER_UPDATES"},
+                    }))
+                    logger.info("Exchange WS connected, subscribed to ORDER_UPDATES")
+                    async for raw in ws:
+                        try:
+                            await self._dispatch(json.loads(raw))
+                        except Exception as e:
+                            logger.error("WS message error: %s", e)
+            except Exception as e:
+                logger.warning(
+                    "Exchange WS disconnected: %s — reconnecting in %ds", e, RECONNECT_DELAY
+                )
+            finally:
+                self._ws = None
+                if self._pending_order and not self._pending_order.done():
+                    self._pending_order.set_exception(
+                        ExchangeWsError("WS_DISCONNECTED", "WebSocket disconnected mid-order")
+                    )
+            await asyncio.sleep(RECONNECT_DELAY)
+
+    async def _dispatch(self, msg: dict):
+        msg_type = msg.get("type")
+        payload = msg.get("payload", {})
+        if msg_type == "ORDER_ACK":
+            self._resolve_pending(payload)
+        elif msg_type == "ORDER_REJECTED":
+            self._reject_pending(payload)
+        elif msg_type == "ORDER_UPDATE":
+            await _handle_order_update(payload)
+
+    def _resolve_pending(self, payload: dict):
+        if self._pending_order and not self._pending_order.done():
+            self._pending_order.set_result(payload)
+
+    def _reject_pending(self, payload: dict):
+        if self._pending_order and not self._pending_order.done():
+            self._pending_order.set_exception(
+                ExchangeWsError(
+                    payload.get("code", "ORDER_REJECTED"),
+                    payload.get("message", "Order rejected by exchange"),
+                )
+            )
+
+
+# Module-level singleton accessed by order_service
+consumer = ExchangeWsConsumer()
+
+
+# Kept so main.py requires no changes
+async def run():
+    await consumer.run()
 
 
 async def _handle_order_update(payload: dict):
     exchange_order_id = payload.get("order_id")
     status = payload.get("status")
-
-    if not exchange_order_id or status != "FILLED":
+    if not exchange_order_id or status not in _TERMINAL_STATUSES:
         return
 
-    filled_quantity = payload.get("filled_quantity", 0)
-    average_fill_price = payload.get("average_fill_price", 0.0)
+    filled_quantity = payload.get("filled_quantity", 0) or 0
+    average_fill_price = payload.get("average_fill_price", 0.0) or 0.0
     market_time = payload.get("market_time", datetime.now(timezone.utc).isoformat())
 
     async with AsyncSessionLocal() as db:
@@ -32,12 +136,21 @@ async def _handle_order_update(payload: dict):
         )
         order = result.scalar_one_or_none()
         if order is None:
-            logger.warning("Received fill for unknown exchange_order_id=%s", exchange_order_id)
+            logger.warning("Received update for unknown exchange_order_id=%s", exchange_order_id)
             return
 
-        order.status = OrderStatus.FILLED
-        order.filled_quantity = filled_quantity
-        order.filled_price = average_fill_price
+        if status == "PARTIALLY_FILLED":
+            order.filled_quantity = filled_quantity
+            order.filled_price = average_fill_price
+        else:
+            mapped = _STATUS_MAP.get(status)
+            if mapped is None:
+                return
+            order.status = mapped
+            order.filled_quantity = filled_quantity
+            if status == "FILLED":
+                order.filled_price = average_fill_price
+
         await db.commit()
         await db.refresh(order)
 
@@ -47,9 +160,8 @@ async def _handle_order_update(payload: dict):
         side = order.side.value
         wallet_reference_id = order.wallet_reference_id
 
-    await kafka_producer.publish(
-        "order.filled",
-        {
+    if status == "FILLED":
+        await kafka_producer.publish("order.filled", {
             "event_id": str(uuid4()),
             "order_id": str(order_id),
             "user_id": str(user_id),
@@ -58,39 +170,31 @@ async def _handle_order_update(payload: dict):
             "quantity": filled_quantity,
             "price": average_fill_price,
             "filled_at": market_time,
-        },
-    )
+        })
+        if side == "BUY" and wallet_reference_id:
+            try:
+                await wallet_client.settle_trade(
+                    user_id, wallet_reference_id, filled_quantity * average_fill_price
+                )
+            except Exception as e:
+                logger.error("Wallet settlement failed for order %s: %s", order_id, e)
+        elif side == "SELL":
+            proceeds = filled_quantity * average_fill_price
+            try:
+                await wallet_client.credit_funds(user_id, proceeds)
+            except Exception as e:
+                logger.error("Wallet credit failed for order %s: %s", order_id, e)
 
-    if side == "BUY" and wallet_reference_id:
-        actual_cost = filled_quantity * average_fill_price
-        try:
-            await wallet_client.settle_trade(user_id, wallet_reference_id, actual_cost)
-        except Exception as e:
-            logger.error("Wallet settlement failed for order %s: %s", order_id, e)
-
-
-async def run():
-    import websockets
-
-    url = f"{settings.EXCHANGE_WS_URL}?api_key={settings.EXCHANGE_API_KEY}&api_secret={settings.EXCHANGE_API_SECRET}"
-
-    while True:
-        try:
-            async with websockets.connect(url) as ws:
-                await ws.send(json.dumps({
-                    "type": "SUBSCRIBE",
-                    "payload": {"channels": ["ORDER_UPDATES"]},
-                }))
-                logger.info("Exchange WS connected, subscribed to ORDER_UPDATES")
-
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        if msg.get("type") == "ORDER_UPDATE":
-                            await _handle_order_update(msg.get("payload", {}))
-                    except Exception as e:
-                        logger.error("WS message error: %s", e)
-
-        except Exception as e:
-            logger.warning("Exchange WS disconnected: %s — reconnecting in %ds", e, RECONNECT_DELAY)
-            await asyncio.sleep(RECONNECT_DELAY)
+    elif status in ("CANCELLED", "EXPIRED", "REJECTED"):
+        topic = "order.rejected" if status == "REJECTED" else "order.cancelled"
+        await kafka_producer.publish(topic, {
+            "order_id": order_id,
+            "user_id": user_id,
+            "exchange_order_id": exchange_order_id,
+            "reason": status,
+        })
+        if side == "BUY" and wallet_reference_id:
+            try:
+                await wallet_client.release_funds(user_id, wallet_reference_id)
+            except Exception as e:
+                logger.error("Wallet release failed for order %s: %s", order_id, e)
