@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
@@ -38,7 +39,9 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
     await db.flush()
 
     try:
+        exchange_order_id = str(uuid4())
         ws_payload = {
+            "order_id": exchange_order_id,
             "platform_user_id": str(user_id),
             "instrument_type": "STOCK",
             "instrument_id": data.symbol,

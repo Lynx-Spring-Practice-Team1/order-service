@@ -25,6 +25,7 @@ class OrderResponse(BaseModel):
     exchange_order_id: Optional[str]
     filled_quantity: int
     filled_price: Optional[float]
+    exchange_fee: Optional[float]
     reject_reason: Optional[str]
     created_at: datetime
     updated_at: datetime

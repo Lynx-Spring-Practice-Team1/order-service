@@ -18,6 +18,7 @@ class OrderType(str, enum.Enum):
 class OrderStatus(str, enum.Enum):
     PENDING = "PENDING"
     ACCEPTED = "ACCEPTED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
     REJECTED = "REJECTED"
     FILLED = "FILLED"
     CANCELLED = "CANCELLED"
@@ -40,6 +41,7 @@ class Order(Base):
     wallet_reference_id: Mapped[str] = mapped_column(String(200), nullable=True)
     filled_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     filled_price: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
+    exchange_fee: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
     reject_reason: Mapped[str] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

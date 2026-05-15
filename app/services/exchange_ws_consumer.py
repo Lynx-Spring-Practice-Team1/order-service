@@ -13,9 +13,10 @@ from app.services import kafka_producer, wallet_client
 logger = logging.getLogger(__name__)
 RECONNECT_DELAY = 5
 
-_TERMINAL_STATUSES = {"FILLED", "PARTIALLY_FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
+_PROCESSABLE_STATUSES = {"FILLED", "PARTIALLY_FILLED", "CANCELLED", "REJECTED", "EXPIRED"}
 _STATUS_MAP = {
     "FILLED": OrderStatus.FILLED,
+    "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
     "CANCELLED": OrderStatus.CANCELLED,
     "EXPIRED": OrderStatus.CANCELLED,
     "REJECTED": OrderStatus.REJECTED,
@@ -123,11 +124,12 @@ async def run():
 async def _handle_order_update(payload: dict):
     exchange_order_id = payload.get("order_id")
     status = payload.get("status")
-    if not exchange_order_id or status not in _TERMINAL_STATUSES:
+    if not exchange_order_id or status not in _PROCESSABLE_STATUSES:
         return
 
     filled_quantity = payload.get("filled_quantity", 0) or 0
     average_fill_price = payload.get("average_fill_price", 0.0) or 0.0
+    exchange_fee = payload.get("exchange_fee", 0.0) or 0.0
     market_time = payload.get("market_time", datetime.now(timezone.utc).isoformat())
 
     async with AsyncSessionLocal() as db:
@@ -139,17 +141,15 @@ async def _handle_order_update(payload: dict):
             logger.warning("Received update for unknown exchange_order_id=%s", exchange_order_id)
             return
 
-        if status == "PARTIALLY_FILLED":
-            order.filled_quantity = filled_quantity
+        mapped = _STATUS_MAP.get(status)
+        if mapped is None:
+            return
+        order.status = mapped
+        order.filled_quantity = filled_quantity
+        if average_fill_price:
             order.filled_price = average_fill_price
-        else:
-            mapped = _STATUS_MAP.get(status)
-            if mapped is None:
-                return
-            order.status = mapped
-            order.filled_quantity = filled_quantity
-            if status == "FILLED":
-                order.filled_price = average_fill_price
+        if exchange_fee:
+            order.exchange_fee = exchange_fee
 
         await db.commit()
         await db.refresh(order)
