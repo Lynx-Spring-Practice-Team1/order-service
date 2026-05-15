@@ -18,7 +18,19 @@ async def lifespan(app: FastAPI):
     await stop_producer()
 
 
-app = FastAPI(title="Order Service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Order Service",
+    version="1.0.0",
+    lifespan=lifespan,
+    description=(
+        "Order execution service for the broker platform.\n\n"
+        "Platform fee policy: stock fills are charged a configurable platform fee in "
+        "addition to the exchange fee. The default platform fee rate is 0.1% of executed "
+        "trade value. Formula: platform_fee = execution_price * quantity * "
+        "platform_fee_rate, rounded half up to 2 decimal places. The current fee policy "
+        "is exposed at GET /orders/fees."
+    ),
+)
 
 app.add_middleware(
     CORSMiddleware,

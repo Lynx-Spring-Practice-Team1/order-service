@@ -1,5 +1,6 @@
 import enum
 from datetime import datetime, timezone
+from decimal import Decimal
 from sqlalchemy import String, Numeric, Enum, DateTime, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -42,6 +43,8 @@ class Order(Base):
     filled_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     filled_price: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
     exchange_fee: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
+    platform_fee: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
+    platform_fee_rate: Mapped[float] = mapped_column(Numeric(18, 6), nullable=True)
     reject_reason: Mapped[str] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -51,3 +54,11 @@ class Order(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+    @property
+    def total_fee(self) -> Decimal | None:
+        if self.exchange_fee is None and self.platform_fee is None:
+            return None
+        exchange_fee = Decimal(str(self.exchange_fee or 0))
+        platform_fee = Decimal(str(self.platform_fee or 0))
+        return exchange_fee + platform_fee

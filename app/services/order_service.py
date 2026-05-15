@@ -8,6 +8,7 @@ from app.models import Order, OrderStatus, OrderSide, OrderType
 from app.schemas import OrderCreate
 from app.services import kafka_producer, wallet_client, exchange_client
 from app.services.exchange_ws_consumer import consumer as ws_consumer, ExchangeWsError
+from app.services import platform_fees
 
 
 async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Order:
@@ -17,10 +18,12 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
 
     reserve_price = data.price if data.price is not None else data.market_price_estimate
     if data.side == OrderSide.BUY and reserve_price is not None:
-        estimated_cost = float(reserve_price) * data.quantity
+        estimated_trade_value = platform_fees.calculate_trade_value(data.quantity, reserve_price)
+        estimated_platform_fee = platform_fees.calculate_platform_fee(data.quantity, reserve_price)
+        estimated_cost = estimated_trade_value + estimated_platform_fee
         reference_id = f"order-{user_id}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
         try:
-            await wallet_client.reserve_funds(user_id, estimated_cost, reference_id)
+            await wallet_client.reserve_funds(user_id, float(estimated_cost), reference_id)
             reserved = True
         except wallet_client.WalletError as e:
             raise HTTPException(status_code=402, detail=str(e))
@@ -95,6 +98,10 @@ async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Ord
         )
 
     return order
+
+
+def get_fee_policy() -> dict:
+    return platform_fees.get_fee_policy()
 
 
 async def get_orders(db: AsyncSession, user_id: int) -> list[Order]:

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user_id
 from app.database import get_db
-from app.schemas import OrderCreate, OrderResponse
+from app.schemas import OrderCreate, OrderResponse, PlatformFeePolicyResponse
 from app.services import order_service
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -24,6 +24,11 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     return await order_service.get_orders(db, user_id)
+
+
+@router.get("/fees", response_model=PlatformFeePolicyResponse)
+async def get_fee_policy():
+    return order_service.get_fee_policy()
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

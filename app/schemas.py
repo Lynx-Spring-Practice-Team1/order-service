@@ -26,8 +26,18 @@ class OrderResponse(BaseModel):
     filled_quantity: int
     filled_price: Optional[float]
     exchange_fee: Optional[float]
+    platform_fee: Optional[float]
+    platform_fee_rate: Optional[float]
+    total_fee: Optional[float]
     reject_reason: Optional[str]
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PlatformFeePolicyResponse(BaseModel):
+    platform_fee_rate: float
+    formula: str
+    rounding: str
+    platform_profit_total: float
