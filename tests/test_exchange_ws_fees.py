@@ -51,6 +51,7 @@ def make_order(side: OrderSide, wallet_reference_id: str | None = None) -> Order
         exchange_order_id="exchange-1",
         wallet_reference_id=wallet_reference_id,
         filled_quantity=0,
+        platform_fee_rate=Decimal("0.001"),
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -88,7 +89,7 @@ class ExchangeWsFeeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(published_payload["exchange_fee"], 6.51)
         self.assertEqual(published_payload["platform_fee"], 6.51)
         self.assertEqual(published_payload["total_fee"], 13.02)
-        self.assertEqual(platform_fees.get_platform_profit_total(), Decimal("6.51"))
+        self.assertEqual(platform_fees.get_platform_profit_total(), Decimal("0.00"))
 
     async def test_filled_sell_credits_net_proceeds_and_records_profit(self) -> None:
         order = make_order(OrderSide.SELL)
@@ -110,7 +111,33 @@ class ExchangeWsFeeTests(unittest.IsolatedAsyncioTestCase):
 
         credit.assert_awaited_once_with(7, 6491.98)
         self.assertEqual(order.platform_fee, Decimal("6.51"))
-        self.assertEqual(platform_fees.get_platform_profit_total(), Decimal("6.51"))
+        self.assertEqual(platform_fees.get_platform_profit_total(), Decimal("0.00"))
+
+    async def test_filled_update_uses_order_locked_platform_fee_rate(self) -> None:
+        order = make_order(OrderSide.BUY, wallet_reference_id="reserve-1")
+        order.platform_fee_rate = Decimal("0.002")
+        session = FakeSession(order)
+        payload = {
+            "order_id": "exchange-1",
+            "status": "FILLED",
+            "filled_quantity": 50,
+            "average_fill_price": 130.10,
+            "exchange_fee": 6.51,
+        }
+
+        with (
+            patch("app.services.exchange_ws_consumer.AsyncSessionLocal", return_value=session),
+            patch("app.services.exchange_ws_consumer.kafka_producer.publish", new=AsyncMock()) as publish,
+            patch("app.services.exchange_ws_consumer.wallet_client.settle_trade", new=AsyncMock()) as settle,
+        ):
+            await _handle_order_update(payload)
+
+        self.assertEqual(order.platform_fee, Decimal("13.01"))
+        self.assertEqual(order.platform_fee_rate, Decimal("0.002"))
+        settle.assert_awaited_once_with(7, "reserve-1", 6524.52)
+        published_payload = publish.await_args.args[1]
+        self.assertEqual(published_payload["platform_fee_rate"], 0.002)
+        self.assertEqual(published_payload["platform_fee"], 13.01)
 
     async def test_duplicate_filled_update_does_not_charge_or_publish_again(self) -> None:
         order = make_order(OrderSide.BUY, wallet_reference_id="reserve-1")

@@ -62,3 +62,15 @@ class Order(Base):
         exchange_fee = Decimal(str(self.exchange_fee or 0))
         platform_fee = Decimal(str(self.platform_fee or 0))
         return exchange_fee + platform_fee
+
+
+class BrokerFeePolicy(Base):
+    __tablename__ = "broker_fee_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    platform_fee_rate: Mapped[float] = mapped_column(Numeric(18, 6), nullable=False)
+    changed_by: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
+    reason: Mapped[str] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )

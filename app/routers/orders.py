@@ -1,12 +1,27 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user_id
+from app.config import settings
 from app.database import get_db
-from app.schemas import OrderCreate, OrderResponse, PlatformFeePolicyResponse
-from app.services import order_service
+from app.schemas import (
+    FeePolicyHistoryItem,
+    OrderAdminMetrics,
+    OrderCreate,
+    OrderResponse,
+    PlatformFeePolicyResponse,
+    PlatformFeePolicyUpdate,
+)
+from app.services import fee_policy, order_service
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+def require_internal_token(
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+) -> None:
+    if x_internal_token != settings.INTERNAL_SERVICE_TOKEN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid internal token")
 
 
 @router.post("/", response_model=OrderResponse, status_code=201)
@@ -27,8 +42,48 @@ async def list_orders(
 
 
 @router.get("/fees", response_model=PlatformFeePolicyResponse)
-async def get_fee_policy():
-    return order_service.get_fee_policy()
+async def get_fee_policy(db: AsyncSession = Depends(get_db)):
+    return await order_service.get_fee_policy(db)
+
+
+@router.get("/internal/admin/metrics", response_model=OrderAdminMetrics)
+async def get_admin_metrics(
+    _: None = Depends(require_internal_token),
+    db: AsyncSession = Depends(get_db),
+):
+    return await order_service.get_admin_metrics(db)
+
+
+@router.get("/internal/admin/fee-policy", response_model=PlatformFeePolicyResponse)
+async def get_admin_fee_policy(
+    _: None = Depends(require_internal_token),
+    db: AsyncSession = Depends(get_db),
+):
+    return await order_service.get_fee_policy(db)
+
+
+@router.post("/internal/admin/fee-policy", response_model=FeePolicyHistoryItem)
+async def update_admin_fee_policy(
+    body: PlatformFeePolicyUpdate,
+    _: None = Depends(require_internal_token),
+    x_admin_user: str | None = Header(default="admin", alias="X-Admin-User"),
+    db: AsyncSession = Depends(get_db),
+):
+    return await fee_policy.set_current_fee_rate(
+        db,
+        body.platform_fee_rate,
+        changed_by=x_admin_user or "admin",
+        reason=body.reason,
+    )
+
+
+@router.get("/internal/admin/fee-policy/history", response_model=list[FeePolicyHistoryItem])
+async def get_admin_fee_history(
+    _: None = Depends(require_internal_token),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=25, ge=1, le=100),
+):
+    return await fee_policy.get_fee_history(db, limit)
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

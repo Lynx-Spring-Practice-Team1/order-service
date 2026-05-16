@@ -3,6 +3,7 @@ import json
 import logging
 from uuid import uuid4
 from datetime import datetime, timezone
+from decimal import Decimal
 from sqlalchemy import select
 
 from app.config import settings
@@ -131,13 +132,6 @@ async def _handle_order_update(payload: dict):
     average_fill_price = payload.get("average_fill_price", 0.0) or 0.0
     exchange_fee = platform_fees.money(payload.get("exchange_fee", 0.0) or 0.0)
     market_time = payload.get("market_time", datetime.now(timezone.utc).isoformat())
-    platform_fee_rate = platform_fees.get_platform_fee_rate()
-    platform_fee = platform_fees.calculate_platform_fee(
-        filled_quantity,
-        average_fill_price,
-        platform_fee_rate,
-    ) if status == "FILLED" else platform_fees.money(0)
-    total_fee = platform_fees.calculate_total_fee(exchange_fee, platform_fee)
     trade_value = platform_fees.calculate_trade_value(filled_quantity, average_fill_price)
 
     async with AsyncSessionLocal() as db:
@@ -155,6 +149,21 @@ async def _handle_order_update(payload: dict):
         mapped = _STATUS_MAP.get(status)
         if mapped is None:
             return
+        platform_fee_rate = (
+            Decimal(str(order.platform_fee_rate))
+            if order.platform_fee_rate is not None
+            else platform_fees.get_platform_fee_rate()
+        )
+        platform_fee = (
+            platform_fees.calculate_platform_fee(
+                filled_quantity,
+                average_fill_price,
+                platform_fee_rate,
+            )
+            if status == "FILLED"
+            else platform_fees.money(0)
+        )
+        total_fee = platform_fees.calculate_total_fee(exchange_fee, platform_fee)
         order.status = mapped
         order.filled_quantity = filled_quantity
         if average_fill_price:
@@ -195,14 +204,12 @@ async def _handle_order_update(payload: dict):
                     wallet_reference_id,
                     float(trade_value + total_fee),
                 )
-                platform_fees.record_platform_profit(platform_fee)
             except Exception as e:
                 logger.error("Wallet settlement failed for order %s: %s", order_id, e)
         elif side == "SELL":
             proceeds = max(platform_fees.money(0), trade_value - total_fee)
             try:
                 await wallet_client.credit_funds(user_id, float(proceeds))
-                platform_fees.record_platform_profit(platform_fee)
             except Exception as e:
                 logger.error("Wallet credit failed for order %s: %s", order_id, e)
 

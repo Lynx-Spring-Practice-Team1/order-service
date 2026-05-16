@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     WALLET_SERVICE_URL: str = "http://wallet-service:8003"
     PLATFORM_FEE_RATE: str = Field(default="0.001", validation_alias="PLATFORM_FEE_RATE")
+    INTERNAL_SERVICE_TOKEN: str = Field(
+        default="change-me-in-production",
+        validation_alias="INTERNAL_SERVICE_TOKEN",
+    )
 
 
 settings = Settings()
