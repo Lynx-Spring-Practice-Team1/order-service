@@ -86,6 +86,23 @@ async def get_admin_fee_history(
     return await fee_policy.get_fee_history(db, limit)
 
 
+@router.get("/my-fees", response_model=dict)
+async def get_my_fees(
+    user_id: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy import func, select
+    from app.models import Order, OrderStatus
+    result = await db.execute(
+        select(func.coalesce(func.sum(Order.platform_fee), 0)).where(
+            Order.user_id == user_id,
+            Order.status == OrderStatus.FILLED,
+        )
+    )
+    total = float(result.scalar() or 0)
+    return {"total_fees_paid": total}
+
+
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
     order_id: int,
