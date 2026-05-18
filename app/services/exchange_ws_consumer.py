@@ -146,6 +146,10 @@ async def _handle_order_update(payload: dict):
             logger.info("Ignoring duplicate FILLED update for exchange_order_id=%s", exchange_order_id)
             return
 
+        # Track whether the order was already CANCELLED before this message so
+        # we can skip a duplicate wallet release (cancel_order() already released).
+        was_already_cancelled = order.status == OrderStatus.CANCELLED
+
         mapped = _STATUS_MAP.get(status)
         if mapped is None:
             return
@@ -221,7 +225,9 @@ async def _handle_order_update(payload: dict):
             "exchange_order_id": exchange_order_id,
             "reason": status,
         })
-        if side == "BUY" and wallet_reference_id:
+        # Skip release if cancel_order() already released synchronously to
+        # avoid crediting the wallet twice.
+        if side == "BUY" and wallet_reference_id and not was_already_cancelled:
             try:
                 await wallet_client.release_funds(user_id, wallet_reference_id)
             except Exception as e:

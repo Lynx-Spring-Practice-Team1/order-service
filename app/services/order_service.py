@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 from sqlalchemy import case, desc, func, select
@@ -9,6 +10,8 @@ from app.schemas import OrderCreate
 from app.services import kafka_producer, wallet_client, exchange_client
 from app.services.exchange_ws_consumer import consumer as ws_consumer, ExchangeWsError
 from app.services import fee_policy, platform_fees
+
+logger = logging.getLogger(__name__)
 
 
 async def create_order(db: AsyncSession, user_id: int, data: OrderCreate) -> Order:
@@ -140,20 +143,42 @@ async def cancel_order(db: AsyncSession, user_id: int, order_id: int) -> Order:
             detail=f"Cannot cancel order with status {order.status.value}",
         )
 
+    # Notify the exchange — best-effort only.  Orders are placed via WebSocket
+    # but cancelled via REST; the REST endpoint may not exist or may be
+    # unreachable.  Any failure here must NOT block the local cancellation:
+    # the user's reserved funds must always be returned regardless of whether
+    # the exchange acknowledges the cancel.
     if order.exchange_order_id:
         try:
             await exchange_client.cancel_order(order.exchange_order_id)
-        except exchange_client.ExchangeError as e:
-            raise HTTPException(status_code=502, detail=f"Exchange cancel failed: {e}")
+        except Exception as exc:
+            # Log and continue — exchange notification is advisory.
+            logger.warning(
+                "Exchange cancel notification failed for order %s (continuing): %s",
+                order_id, exc,
+            )
 
     order.status = OrderStatus.CANCELLED
+    wallet_ref = order.wallet_reference_id
+    local_order_id = order.id
     await db.commit()
     await db.refresh(order)
 
-    await kafka_producer.publish(
-        "order.cancelled",
-        {"order_id": order.id, "user_id": user_id, "exchange_order_id": order.exchange_order_id},
-    )
+    # Release reserved wallet funds immediately so the user sees their
+    # balance restored without waiting for an exchange WebSocket message.
+    if order.side == OrderSide.BUY and wallet_ref:
+        try:
+            await wallet_client.release_funds(user_id, wallet_ref)
+        except Exception as exc:
+            logger.warning("Wallet release on cancel failed for order %s: %s", local_order_id, exc)
+
+    try:
+        await kafka_producer.publish(
+            "order.cancelled",
+            {"order_id": order.id, "user_id": user_id, "exchange_order_id": order.exchange_order_id},
+        )
+    except Exception as exc:
+        logger.warning("Kafka publish failed for order.cancelled %s: %s", local_order_id, exc)
 
     return order
 

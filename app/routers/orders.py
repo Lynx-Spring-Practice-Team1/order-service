@@ -93,14 +93,17 @@ async def get_my_fees(
 ):
     from sqlalchemy import func, select
     from app.models import Order, OrderStatus
-    result = await db.execute(
-        select(func.coalesce(func.sum(Order.platform_fee), 0)).where(
-            Order.user_id == user_id,
-            Order.status == OrderStatus.FILLED,
-        )
-    )
-    total = float(result.scalar() or 0)
-    return {"total_fees_paid": total}
+    base = select(Order).where(Order.user_id == user_id, Order.status == OrderStatus.FILLED)
+    r1 = await db.execute(select(func.coalesce(func.sum(Order.platform_fee), 0)).where(
+        Order.user_id == user_id, Order.status == OrderStatus.FILLED,
+    ))
+    r2 = await db.execute(select(func.coalesce(func.sum(Order.exchange_fee), 0)).where(
+        Order.user_id == user_id, Order.status == OrderStatus.FILLED,
+    ))
+    return {
+        "total_fees_paid": float(r1.scalar() or 0),
+        "total_exchange_fees": float(r2.scalar() or 0),
+    }
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
